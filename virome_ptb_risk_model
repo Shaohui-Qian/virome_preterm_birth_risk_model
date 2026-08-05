@@ -1,0 +1,100 @@
+library(dplyr)
+library(broom)
+library(forestmodel)
+library(readxl)
+file_in  <- "早产分析矩阵.xlsx"
+width_p  <- 8
+height_p <- 6
+dpi_p    <- 300
+
+# model1‑model4 定义
+model_conf <- list(
+  list(outfile = "1-基础.pdf",      covs = c("年龄", "BMI")),
+  list(outfile = "2-产科.pdf",      covs = c("年龄", "BMI", "孕次", "早产史")),
+  list(outfile = "3-合并症.pdf",    covs = c("年龄", "BMI", "孕次", "早产史",
+                                          "妊娠期高血压","妊娠期高血糖","自免甲状腺炎",
+                                          "甲减或亚甲减","甲亢或亚甲亢","低T4血症")),
+  list(outfile = "4-病毒感染.pdf",  covs = c("年龄", "BMI", "孕次", "早产史",
+                                         "妊娠期高血压","妊娠期高血糖","自免甲状腺炎",
+                                         "甲减或亚甲减","甲亢或亚甲亢","低T4血症", "病毒感染"))
+)
+
+virus_cols <- c("virus1", "virus2", "virus3", "virus4", "virus5")
+covs_adjust <- c(
+  "年龄", "BMI", "孕次", "早产史",
+  "妊娠期高血压", "妊娠期高血糖",
+  "自免甲状腺炎", "甲减或亚甲减",
+  "甲亢或亚甲亢", "低T4血症"
+)
+
+# 给中文列名加反引号
+backtick <- function(x) sprintf("`%s`", x)
+
+# 批量glm二分类，画森林图
+run_glm_forest <- function(dat, y_var, cov_vec, title_plot, out_pdf){
+  rhs <- paste(backtick(cov_vec), collapse = " + ")
+  frm <- as.formula(paste(y_var, "~", rhs))
+  fit <- glm(frm, data = dat, family = binomial)
+  p <- forest_model(fit, exponentiate = TRUE) + labs(title = title_plot)
+  ggsave(out_pdf, p, width = width_p, height = height_p, dpi = dpi_p)
+  invisible(fit)
+}
+
+dat <- readxl::read_xlsx(file_in)
+# 循环运行
+for(m in model_conf){
+  run_glm_forest(
+    dat = dat,
+    y_var = "早产",
+    cov_vec = m$covs,
+    title_plot = "早产关联性分析",
+    out_pdf = m$outfile
+  )
+}
+
+# model5：单独感染分析
+dat_prep5 <- dat %>%
+  select(病毒感染, 早产, all_of(covs_adjust), all_of(virus_cols)) %>%
+  mutate(
+    across(all_of(virus_cols), ~ coalesce(.x, 0)),
+    n_virus = rowSums(across(all_of(virus_cols)))
+  )
+
+control_5 <- dat_prep5 %>% filter(病毒感染 == 0, n_virus == 0)
+rhs_adj5 <- paste(backtick(covs_adjust), collapse = " + ")
+
+for(v in virus_cols){
+  case_5 <- dat_prep5 %>% filter(n_virus == 1, .data[[v]] == 1)
+  dat_mod5 <- bind_rows(
+    control_5 %>% mutate(exposure = 0),
+    case_5 %>% mutate(exposure = 1)
+  ) %>%
+    mutate(exposure = factor(exposure, levels = 0:1, labels = c("无感染", paste0(v, "_仅单感染"))))
+  
+  frm5 <- as.formula(paste("早产 ~ exposure +", rhs_adj5))
+  fit5 <- glm(frm5, data = dat_mod5, family = binomial)
+  p5 <- forest_model(fit5, exponentiate = TRUE) + labs(title = "病毒感染与早产的关联性分析")
+  ggsave(paste0("model5_", v, ".pdf"), p5, width = width_p, height = height_p, dpi = dpi_p)
+}
+
+# model6：病毒阳性（单独感染+共感染）
+dat_prep6 <- dat %>%
+  select(病毒感染, 早产, all_of(covs_adjust), all_of(virus_cols)) %>%
+  mutate(across(all_of(virus_cols), ~ coalesce(.x, 0)))
+
+control_6 <- dat_prep6 %>% filter(病毒感染 == 0)
+rhs_adj6 <- paste(backtick(covs_adjust), collapse = " + ")
+
+for(v in virus_cols){
+  case_6 <- dat_prep6 %>% filter(.data[[v]] == 1)
+  dat_mod6 <- bind_rows(
+    control_6 %>% mutate(exposure = 0),
+    case_6 %>% mutate(exposure = 1)
+  ) %>%
+    mutate(exposure = factor(exposure, levels = 0:1, labels = c("无感染", paste0(v, "+"))))
+  
+  frm6 <- as.formula(paste("早产 ~ exposure +", rhs_adj6))
+  fit6 <- glm(frm6, data = dat_mod6, family = binomial)
+  p6 <- forest_model(fit6, exponentiate = TRUE) + labs(title = "病毒共感染与早产的关联性分析")
+  ggsave(paste0("model6_", v, ".pdf"), p6, width = width_p, height = height_p, dpi = dpi_p)
+}
